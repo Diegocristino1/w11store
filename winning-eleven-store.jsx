@@ -1,6 +1,4 @@
 import { useState, useEffect, useRef } from "react";
-import imageManifest from "./src/generated/image-manifest.json";
-import teamsCatalog from "./src/generated/teams-catalog.json";
 
 const STORAGE_KEY = "we_store_v2";
 const ADMIN_PWD = "admin123";
@@ -25,6 +23,19 @@ function assetUrl(path) {
 
 function assetUrls(paths) {
   return (paths || []).map(assetUrl);
+}
+
+async function fetchStoreCatalog() {
+  const [manifestRes, catalogRes] = await Promise.all([
+    fetch("/catalog/image-manifest.json"),
+    fetch("/catalog/teams-catalog.json"),
+  ]);
+  if (!manifestRes.ok || !catalogRes.ok) {
+    throw new Error("Não foi possível carregar o catálogo de fotos.");
+  }
+  const imageManifest = await manifestRes.json();
+  const teamsCatalog = await catalogRes.json();
+  return { imageManifest, catalogLeagues: teamsCatalog.leagues || [] };
 }
 
 /* ───────── TEAMS DATA (legado — admin / produtos) ───────── */
@@ -286,29 +297,27 @@ function canShowAdmin() {
   return new URLSearchParams(window.location.search).get("admin") === "1";
 }
 
-/* Catálogo dinâmico — gerado a partir das pastas em public/teams/ */
-const CATALOG_LEAGUES = teamsCatalog.leagues || [];
-
-function getTeamImages(team) {
-  if (!team) return [];
+/* Catálogo dinâmico — carregado de /catalog/*.json em runtime */
+function getTeamImages(team, imageManifest) {
+  if (!team || !imageManifest) return [];
   if (team.flat) return assetUrls(imageManifest.flatTeams?.[team.id]);
   return assetUrls(imageManifest.teams?.[team.leaguePath]?.[team.teamPath || team.id]);
 }
 
-function findCatalogTeam(teamId) {
-  for (const lg of CATALOG_LEAGUES) {
+function findCatalogTeam(teamId, catalogLeagues) {
+  for (const lg of catalogLeagues) {
     const team = lg.teams.find((t) => t.id === teamId);
     if (team) return { ...team, leagueId: lg.id, leagueLabel: lg.label };
   }
   return null;
 }
 
-function findCatalogTeamLeague(teamId) {
-  return findCatalogTeam(teamId)?.leagueId ?? null;
+function findCatalogTeamLeague(teamId, catalogLeagues) {
+  return findCatalogTeam(teamId, catalogLeagues)?.leagueId ?? null;
 }
 
-function catalogTeamForProduct(teamId) {
-  const fromCatalog = findCatalogTeam(teamId);
+function catalogTeamForProduct(teamId, catalogLeagues) {
+  const fromCatalog = findCatalogTeam(teamId, catalogLeagues);
   if (fromCatalog) return fromCatalog;
   for (const [leagueId, teams] of Object.entries(TEAMS)) {
     const t = teams.find((x) => x.id === teamId);
@@ -556,14 +565,16 @@ function TeamCircle({ team, size=72, selected=false }) {
 /* ───────── MAIN APP ───────── */
 export default function App() {
   const [products, setProducts]       = useState([]);
+  const [imageManifest, setImageManifest] = useState(null);
+  const [catalogLeagues, setCatalogLeagues] = useState([]);
   const [view, setView]               = useState("store");
-  const [activeLeague, setActiveLeague] = useState(CATALOG_LEAGUES[0]?.id || "br");
+  const [activeLeague, setActiveLeague] = useState("br");
 
   useEffect(() => {
-    if (!CATALOG_LEAGUES.some((lg) => lg.id === activeLeague)) {
-      setActiveLeague(CATALOG_LEAGUES[0]?.id || "br");
+    if (!catalogLeagues.some((lg) => lg.id === activeLeague)) {
+      setActiveLeague(catalogLeagues[0]?.id || "br");
     }
-  }, [activeLeague]);
+  }, [activeLeague, catalogLeagues]);
   const [selectedTeam, setSelectedTeam] = useState(null);
   const [selectedProduct, setSelectedProduct] = useState(null);
   const [cart, setCart]               = useState([]);
@@ -648,10 +659,19 @@ export default function App() {
   useEffect(() => {
     (async () => {
       try {
-        const r = await window.storage.get(STORAGE_KEY);
-        setProducts(r ? JSON.parse(r.value) : []);
-      } catch { setProducts([]); }
-      setLoading(false);
+        const [catalog, storageResult] = await Promise.all([
+          fetchStoreCatalog(),
+          window.storage.get(STORAGE_KEY).catch(() => null),
+        ]);
+        setImageManifest(catalog.imageManifest);
+        setCatalogLeagues(catalog.catalogLeagues);
+        setActiveLeague(catalog.catalogLeagues[0]?.id || "br");
+        setProducts(storageResult ? JSON.parse(storageResult.value) : []);
+      } catch {
+        setProducts([]);
+      } finally {
+        setLoading(false);
+      }
     })();
   }, []);
 
@@ -661,7 +681,7 @@ export default function App() {
   const cartTotal = cart.reduce((s,i)=>s+i.price*i.qty,0);
 
   const openTeam = (team, leagueId) =>
-    setSelectedTeam({ ...team, leagueId: leagueId || team.leagueId || findCatalogTeamLeague(team.id) });
+    setSelectedTeam({ ...team, leagueId: leagueId || team.leagueId || findCatalogTeamLeague(team.id, catalogLeagues) });
 
   const addToCart = (product, size) => {
     setCart(c => { const ex=c.find(i=>i.id===product.id&&i.size===size); return ex?c.map(i=>i.id===product.id&&i.size===size?{...i,qty:i.qty+1}:i):[...c,{...product,size,qty:1}]; });
@@ -689,7 +709,7 @@ export default function App() {
   };
 
   /* — listagem de ligas/times — */
-  if (loading) return (
+  if (loading || !imageManifest) return (
     <div style={{display:"flex",alignItems:"center",justifyContent:"center",minHeight:"100vh",...starBg}}>
       <div style={{textAlign:"center",fontFamily:FF}}>
         <div style={{width:52,height:52,border:"3px solid #f5c200",borderTopColor:"transparent",borderRadius:"50%",margin:"0 auto 16px",animation:"spin 1s linear infinite"}}/>
@@ -762,6 +782,7 @@ export default function App() {
           onSelectProduct={p=>{setSelectedProduct(p);setView("product");}}
           GOLD={GOLD}
           FF={FF}
+          catalogLeagues={catalogLeagues}
         />
       )}
 
@@ -805,7 +826,7 @@ export default function App() {
           {/* LEAGUE SECTIONS */}
           <>
             <div className="league-tabs-bar">
-              {CATALOG_LEAGUES.map(lg=>(
+              {catalogLeagues.map(lg=>(
                 <button key={lg.id} className={`lgtab${activeLeague===lg.id?" on":""}`}
                   onClick={()=>setActiveLeague(lg.id)}>
                   {lg.icon} {lg.label}
@@ -814,7 +835,7 @@ export default function App() {
             </div>
 
             <div className="page-section">
-              {CATALOG_LEAGUES.filter(lg=>lg.id===activeLeague).map(lg=>(
+              {catalogLeagues.filter(lg=>lg.id===activeLeague).map(lg=>(
                 <section key={lg.id}>
                   <div className="league-header">
                     <span style={{fontSize:36}}>{lg.icon}</span>
@@ -851,18 +872,19 @@ export default function App() {
       {view==="store"&&selectedTeam&&(
         <TeamProductsView
           team={selectedTeam}
-          images={getTeamImages(selectedTeam)}
+          images={getTeamImages(selectedTeam, imageManifest)}
           products={products}
           onBack={()=>setSelectedTeam(null)}
           onSelectProduct={p=>{setSelectedProduct(p);setView("product");}}
           GOLD={GOLD}
           FF={FF}
+          catalogLeagues={catalogLeagues}
         />
       )}
 
       {/* ── PRODUCT DETAIL ── */}
       {view==="product"&&selectedProduct&&(
-        <ProductDetail product={selectedProduct} onBack={()=>{setView("store");}} onAdd={addToCart} GOLD={GOLD} FF={FF}/>
+        <ProductDetail product={selectedProduct} onBack={()=>{setView("store");}} onAdd={addToCart} GOLD={GOLD} FF={FF} catalogLeagues={catalogLeagues}/>
       )}
 
       {/* ── ADMIN LOGIN ── */}
@@ -877,6 +899,7 @@ export default function App() {
       {showAdmin&&view==="admin"&&adminLoggedIn&&(
         <AdminPanel FF={FF} GOLD={GOLD} products={products} adminView={adminView} setAdminView={setAdminView}
           editingProduct={editingProduct} setEditingProduct={setEditingProduct}
+          catalogLeagues={catalogLeagues}
           onSave={p=>{
             if(p.id&&products.find(x=>x.id===p.id)){save(products.map(x=>x.id===p.id?p:x));toast$("Atualizado! ✅");}
             else{save([...products,{...p,id:Date.now().toString()}]);toast$("Produto adicionado! ✅");}
@@ -935,7 +958,7 @@ export default function App() {
 }
 
 /* ═══ CATEGORY GALLERY ═══ */
-function CategoryGalleryView({ category, images, products, onBack, onSelectProduct, GOLD, FF }) {
+function CategoryGalleryView({ category, images, products, onBack, onSelectProduct, GOLD, FF, catalogLeagues = [] }) {
   const categoryProducts = products.filter(p => p.category === category.productCategory);
   const hasImages = images.length > 0;
 
@@ -978,7 +1001,7 @@ function CategoryGalleryView({ category, images, products, onBack, onSelectProdu
           <h2 style={{fontFamily:FF,fontSize:28,color:GOLD,letterSpacing:3,marginBottom:20}}>PRODUTOS</h2>
           <div className="product-grid">
             {categoryProducts.map(p => (
-              <ProductCard key={p.id} product={p} onClick={() => onSelectProduct(p)} GOLD={GOLD} FF={FF}/>
+              <ProductCard key={p.id} product={p} onClick={() => onSelectProduct(p)} GOLD={GOLD} FF={FF} catalogLeagues={catalogLeagues}/>
             ))}
           </div>
         </>
@@ -988,7 +1011,7 @@ function CategoryGalleryView({ category, images, products, onBack, onSelectProdu
 }
 
 /* ═══ TEAM PRODUCTS VIEW ═══ */
-function TeamProductsView({ team, images, products, onBack, onSelectProduct, GOLD, FF }) {
+function TeamProductsView({ team, images, products, onBack, onSelectProduct, GOLD, FF, catalogLeagues = [] }) {
   const teamProducts = products.filter(p=>p.teamId===team.id);
   const hasImages = images.length > 0;
 
@@ -1022,7 +1045,7 @@ function TeamProductsView({ team, images, products, onBack, onSelectProduct, GOL
         <>
           {hasImages && <h2 style={{fontFamily:FF,fontSize:28,color:GOLD,letterSpacing:3,marginBottom:20}}>PRODUTOS</h2>}
           <div className="product-grid">
-            {teamProducts.map(p=><ProductCard key={p.id} product={p} onClick={()=>onSelectProduct(p)} GOLD={GOLD} FF={FF}/>)}
+            {teamProducts.map(p=><ProductCard key={p.id} product={p} onClick={()=>onSelectProduct(p)} GOLD={GOLD} FF={FF} catalogLeagues={catalogLeagues}/>)}
           </div>
         </>
       ) : !hasImages ? (
@@ -1043,9 +1066,9 @@ function TeamProductsView({ team, images, products, onBack, onSelectProduct, GOL
 }
 
 /* ═══ PRODUCT CARD ═══ */
-function ProductCard({ product, onClick, GOLD, FF }) {
+function ProductCard({ product, onClick, GOLD, FF, catalogLeagues = [] }) {
   const [lightboxOpen, setLightboxOpen] = useState(false);
-  const teamObj = catalogTeamForProduct(product.teamId);
+  const teamObj = catalogTeamForProduct(product.teamId, catalogLeagues);
   const disc = product.originalPrice?Math.round((1-product.price/product.originalPrice)*100):null;
   const inquiryContext = { section: "Produto", name: product.team, productName: product.name };
   return (
@@ -1106,10 +1129,10 @@ function ProductCard({ product, onClick, GOLD, FF }) {
 }
 
 /* ═══ PRODUCT DETAIL ═══ */
-function ProductDetail({ product, onBack, onAdd, GOLD, FF }) {
+function ProductDetail({ product, onBack, onAdd, GOLD, FF, catalogLeagues = [] }) {
   const [sel,setSel]=useState(null);
   const [lightboxOpen, setLightboxOpen] = useState(false);
-  const teamObj = catalogTeamForProduct(product.teamId);
+  const teamObj = catalogTeamForProduct(product.teamId, catalogLeagues);
   const inquiryContext = { section: "Produto", name: product.team, productName: product.name };
   return (
     <div className="page-section" style={{animation:"fadeUp .3s ease"}}>
@@ -1209,7 +1232,7 @@ function AdminLogin({ onLogin, onBack, FF, GOLD }) {
 }
 
 /* ═══ ADMIN PANEL ═══ */
-function AdminPanel({ FF, GOLD, products, adminView, setAdminView, editingProduct, setEditingProduct, onSave, onDelete, onLogout }) {
+function AdminPanel({ FF, GOLD, products, adminView, setAdminView, editingProduct, setEditingProduct, onSave, onDelete, onLogout, catalogLeagues = [] }) {
   const avgPrice = products.length?products.reduce((s,p)=>s+p.price,0)/products.length:0;
   const uniqTeams = [...new Set(products.map(p=>p.teamId))].length;
   const stats = [
@@ -1251,7 +1274,7 @@ function AdminPanel({ FF, GOLD, products, adminView, setAdminView, editingProduc
           ):(
             <div style={{display:"flex",flexDirection:"column",gap:10}}>
               {products.map(p=>{
-                const teamObj=catalogTeamForProduct(p.teamId);
+                const teamObj=catalogTeamForProduct(p.teamId, catalogLeagues);
                 return (
                   <div key={p.id} style={{background:"#161616",borderRadius:12,padding:"13px 18px",border:`1px solid #1e1e1e`,display:"flex",alignItems:"center",gap:14}}>
                     <TeamCircle team={teamObj} size={52}/>
@@ -1273,7 +1296,7 @@ function AdminPanel({ FF, GOLD, products, adminView, setAdminView, editingProduc
       )}
 
       {(adminView==="add"||adminView==="edit")&&(
-        <ProductForm FF={FF} GOLD={GOLD} product={editingProduct}
+        <ProductForm FF={FF} GOLD={GOLD} product={editingProduct} catalogLeagues={catalogLeagues}
           onSave={onSave} onCancel={()=>{setAdminView("list");setEditingProduct(null);}}/>
       )}
     </div>
@@ -1281,8 +1304,8 @@ function AdminPanel({ FF, GOLD, products, adminView, setAdminView, editingProduc
 }
 
 /* ═══ PRODUCT FORM ═══ */
-function ProductForm({ FF, GOLD, product, onSave, onCancel }) {
-  const allTeams = CATALOG_LEAGUES.flatMap((lg) =>
+function ProductForm({ FF, GOLD, product, onSave, onCancel, catalogLeagues = [] }) {
+  const allTeams = catalogLeagues.flatMap((lg) =>
     lg.teams.map((t) => ({ ...t, leagueId: lg.id, leagueName: lg.label }))
   );
   const defaultTeam = allTeams[0] || { id: "flamengo", name: "Flamengo" };
@@ -1311,7 +1334,7 @@ function ProductForm({ FF, GOLD, product, onSave, onCancel }) {
           <div>
             <label style={{fontSize:11,letterSpacing:2,color:"#666",display:"block",marginBottom:7}}>TIME *</label>
             <select className="inp" value={f.teamId} onChange={e=>{const t=allTeams.find(x=>x.id===e.target.value);setF(p=>({...p,teamId:e.target.value,team:t?.name||""}));}}>
-              {CATALOG_LEAGUES.map(lg=>(
+              {catalogLeagues.map(lg=>(
                 <optgroup key={lg.id} label={`${lg.icon} ${lg.label}`}>
                   {lg.teams.map(t=><option key={t.id} value={t.id}>{t.name}</option>)}
                 </optgroup>

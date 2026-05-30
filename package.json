@@ -12,6 +12,8 @@
     "dev": "node scripts/watch-sync.mjs",
     "build": "node scripts/prebuild-catalog.mjs && node scripts/sync-store.mjs && vite build",
     "deploy:images": "node scripts/deploy-images-cf.mjs",
+    "compress:images": "node scripts/compress-images.mjs",
+    "compress:all": "node scripts/compress-images.mjs && node scripts/generate-image-manifest.mjs && node scripts/generate-teams-catalog.mjs",
     "preview": "vite preview"
   },
   "dependencies": {
@@ -20,6 +22,7 @@
   },
   "devDependencies": {
     "@vitejs/plugin-react": "^4.5.2",
+    "sharp": "^0.34.2",
     "vite": "^6.3.5"
   }
 }

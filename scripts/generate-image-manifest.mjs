@@ -68,6 +68,10 @@ export function generateImageManifest() {
     }
   }
 
+  return manifest;
+}
+
+export function writeImageManifest(manifest) {
   fs.mkdirSync(path.dirname(outFile), { recursive: true });
   fs.writeFileSync(outFile, JSON.stringify(manifest, null, 2));
   return manifest;
@@ -75,7 +79,7 @@ export function generateImageManifest() {
 
 const isMain = process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
 if (isMain) {
-  const m = generateImageManifest();
+  const m = writeImageManifest(generateImageManifest());
   const catCount = Object.values(m.categories).reduce((s, a) => s + a.length, 0);
   const nestedCount = Object.values(m.teams).reduce(
     (s, league) => s + Object.values(league).reduce((t, a) => t + a.length, 0),
