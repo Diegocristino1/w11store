@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Winning Eleven Store</title>
+    <script>
+      if (!window.storage) {
+        window.storage = {
+          async get(key) {
+            const value = localStorage.getItem(key);
+            return value == null ? null : { value };
+          },
+          async set(key, value) {
+            localStorage.setItem(key, value);
+          },
+        };
+      }
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.jsx"></script>
+  </body>
+</html>
