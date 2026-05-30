@@ -14,6 +14,19 @@ const STORE_CONTACT = {
   instagramUrl: "https://instagram.com/w11store",
 };
 
+const ASSET_BASE = (import.meta.env.VITE_ASSET_BASE_URL || "").replace(/\/$/, "");
+
+function assetUrl(path) {
+  if (!path) return path;
+  if (/^(https?:|data:|blob:)/i.test(path)) return path;
+  const p = path.startsWith("/") ? path : `/${path}`;
+  return ASSET_BASE ? `${ASSET_BASE}${p}` : p;
+}
+
+function assetUrls(paths) {
+  return (paths || []).map(assetUrl);
+}
+
 /* ───────── TEAMS DATA (legado — admin / produtos) ───────── */
 const LEAGUES = [
   { id:"br",    label:"Brasileirão",    icon:"🇧🇷", color:"#009c3b" },
@@ -27,7 +40,8 @@ const LEAGUES = [
 ];
 
 /* Fotos por time: public/teams/<liga>/<id>/  →  /teams/<liga>/<id>/arquivo.jpg */
-const teamPhotoUrl = (leagueId, teamId, file) => `/teams/${leagueId}/${teamId}/${file}`;
+const teamPhotoUrl = (leagueId, teamId, file) =>
+  assetUrl(`/teams/${leagueId}/${teamId}/${file}`);
 
 const TEAMS = {
   br:[
@@ -277,8 +291,8 @@ const CATALOG_LEAGUES = teamsCatalog.leagues || [];
 
 function getTeamImages(team) {
   if (!team) return [];
-  if (team.flat) return imageManifest.flatTeams?.[team.id] || [];
-  return imageManifest.teams?.[team.leaguePath]?.[team.teamPath || team.id] || [];
+  if (team.flat) return assetUrls(imageManifest.flatTeams?.[team.id]);
+  return assetUrls(imageManifest.teams?.[team.leaguePath]?.[team.teamPath || team.id]);
 }
 
 function findCatalogTeam(teamId) {
@@ -742,7 +756,7 @@ export default function App() {
       {view==="store"&&selectedCategory&&(
         <CategoryGalleryView
           category={selectedCategory}
-          images={imageManifest.categories?.[selectedCategory.folder] || []}
+          images={assetUrls(imageManifest.categories?.[selectedCategory.folder])}
           products={products}
           onBack={()=>setSelectedCategory(null)}
           onSelectProduct={p=>{setSelectedProduct(p);setView("product");}}
@@ -1047,7 +1061,7 @@ function ProductCard({ product, onClick, GOLD, FF }) {
               style={{width:"100%",height:"100%",padding:0,border:"none",cursor:"pointer",display:"block",background:"none"}}
               aria-label="Comprar via WhatsApp"
             >
-              <img src={product.image} alt={product.name} style={{width:"100%",height:"100%",objectFit:"cover",pointerEvents:"none"}}/>
+              <img src={assetUrl(product.image)} alt={product.name} style={{width:"100%",height:"100%",objectFit:"cover",pointerEvents:"none"}}/>
             </button>
             <button
               type="button"
@@ -1079,7 +1093,7 @@ function ProductCard({ product, onClick, GOLD, FF }) {
       </div>
       {lightboxOpen && product.image && (
         <ImageLightbox
-          images={[product.image]}
+          images={assetUrls([product.image])}
           index={0}
           onClose={()=>setLightboxOpen(false)}
           onChange={()=>{}}
@@ -1110,7 +1124,7 @@ function ProductDetail({ product, onBack, onAdd, GOLD, FF }) {
                 style={{width:"100%",height:"100%",padding:0,border:"none",cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",background:"none"}}
                 aria-label="Comprar via WhatsApp"
               >
-                <img src={product.image} alt={product.name} style={{width:"100%",height:"100%",objectFit:"cover",pointerEvents:"none"}}/>
+                <img src={assetUrl(product.image)} alt={product.name} style={{width:"100%",height:"100%",objectFit:"cover",pointerEvents:"none"}}/>
               </button>
               <button
                 type="button"
@@ -1162,7 +1176,7 @@ function ProductDetail({ product, onBack, onAdd, GOLD, FF }) {
       </div>
       {lightboxOpen && product.image && (
         <ImageLightbox
-          images={[product.image]}
+          images={assetUrls([product.image])}
           index={0}
           onClose={()=>setLightboxOpen(false)}
           onChange={()=>{}}

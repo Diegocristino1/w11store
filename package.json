@@ -10,7 +10,8 @@
     "setup:teams": "node scripts/create-team-folders.mjs && node scripts/cleanup-empty-folders.mjs",
     "cleanup:folders": "node scripts/cleanup-empty-folders.mjs && node scripts/generate-image-manifest.mjs && node scripts/generate-teams-catalog.mjs",
     "dev": "node scripts/watch-sync.mjs",
-    "build": "node scripts/generate-image-manifest.mjs && node scripts/generate-teams-catalog.mjs && node scripts/sync-store.mjs && vite build",
+    "build": "node scripts/prebuild-catalog.mjs && node scripts/sync-store.mjs && vite build",
+    "deploy:images": "node scripts/deploy-images-cf.mjs",
     "preview": "vite preview"
   },
   "dependencies": {
