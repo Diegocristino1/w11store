@@ -2,7 +2,7 @@ import fs from "fs";
 import path from "path";
 import { spawn } from "child_process";
 import { fileURLToPath } from "url";
-import { generateImageManifest } from "./generate-image-manifest.mjs";
+import { generateImageManifest, writeImageManifest } from "./generate-image-manifest.mjs";
 import { writeTeamsCatalog } from "./generate-teams-catalog.mjs";
 import { cleanupEmptyFolders } from "./cleanup-empty-folders.mjs";
 
@@ -57,10 +57,11 @@ function scheduleSync() {
 
 function scheduleManifest() {
   clearTimeout(manifestDebounce);
-  manifestDebounce = setTimeout(() => {
+  manifestDebounce = setTimeout(async () => {
     try {
       cleanupEmptyFolders({ quiet: true });
-      const manifest = generateImageManifest();
+      const manifest = await generateImageManifest();
+      await writeImageManifest(manifest);
       writeTeamsCatalog(manifest);
     } catch (err) {
       console.error("Erro ao atualizar manifest de imagens:", err.message);
@@ -77,7 +78,8 @@ function watchDir(dir) {
 
 syncFiles();
 cleanupEmptyFolders({ quiet: true });
-const initialManifest = generateImageManifest();
+const initialManifest = await generateImageManifest();
+await writeImageManifest(initialManifest);
 writeTeamsCatalog(initialManifest);
 
 fs.mkdirSync(path.dirname(mirror), { recursive: true });

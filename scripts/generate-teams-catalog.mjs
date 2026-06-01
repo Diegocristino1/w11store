@@ -130,7 +130,10 @@ export function generateTeamsCatalog(manifest) {
   return { generatedAt: new Date().toISOString(), leagues };
 }
 
-export function writeTeamsCatalog(manifest = generateImageManifest()) {
+export function writeTeamsCatalog(manifest) {
+  if (!manifest || typeof manifest.then === "function") {
+    throw new Error("writeTeamsCatalog requer manifest gerado (use await generateImageManifest()).");
+  }
   const catalog = generateTeamsCatalog(manifest);
   fs.mkdirSync(path.dirname(outFile), { recursive: true });
   fs.writeFileSync(outFile, JSON.stringify(catalog, null, 2));
@@ -140,4 +143,7 @@ export function writeTeamsCatalog(manifest = generateImageManifest()) {
 }
 
 const isMain = process.argv[1]?.includes("generate-teams-catalog");
-if (isMain) writeTeamsCatalog();
+if (isMain) {
+  const manifest = await generateImageManifest();
+  writeTeamsCatalog(manifest);
+}

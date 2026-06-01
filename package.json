@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "sync": "node scripts/sync-store.mjs",
+    "images:clear": "node scripts/clear-all-images.mjs",
     "images:manifest": "node scripts/generate-image-manifest.mjs",
     "images:catalog": "node scripts/generate-teams-catalog.mjs",
     "setup:teams": "node scripts/create-team-folders.mjs && node scripts/cleanup-empty-folders.mjs",

@@ -1,7 +1,22 @@
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useMemo } from "react";
+import {
+  fetchPublishedGallery,
+  loadLocalGalleryDraft,
+  saveLocalGalleryDraft,
+  clearLocalGalleryDraft,
+  downloadGalleryStore,
+  importGalleryStoreFromFile,
+  mergeGalleryIntoManifest,
+  resolveGalleryImageUrl,
+  isGalleryImageRef,
+  compressImageFile,
+  addImagesToGallery,
+  removeGalleryGroup,
+  emptyGalleryStore,
+} from "./gallery-store.js";
 
 const STORAGE_KEY = "we_store_v2";
-const ADMIN_PWD = "admin123";
+const ADMIN_PWD = "winning";
 
 const STORE_CONTACT = {
   whatsapp: "5561998854511",
@@ -14,28 +29,154 @@ const STORE_CONTACT = {
 
 const ASSET_BASE = (import.meta.env.VITE_ASSET_BASE_URL || "").replace(/\/$/, "");
 
-function assetUrl(path) {
+function assetUrl(path, galleryImages) {
   if (!path) return path;
+  if (isGalleryImageRef(path)) return resolveGalleryImageUrl(path, galleryImages);
   if (/^(https?:|data:|blob:)/i.test(path)) return path;
   const p = path.startsWith("/") ? path : `/${path}`;
   return ASSET_BASE ? `${ASSET_BASE}${p}` : p;
 }
 
-function assetUrls(paths) {
-  return (paths || []).map(assetUrl);
+function assetUrls(paths, galleryImages) {
+  return (paths || []).map((p) => assetUrl(p, galleryImages));
+}
+
+const TIMESTAMP_GROUP_GAP_MS = 30_000;
+
+function imageBasename(url) {
+  const name = (url.split("/").pop() || "").split("?")[0];
+  try {
+    return decodeURIComponent(name);
+  } catch {
+    return name;
+  }
+}
+
+function imageStem(url) {
+  return imageBasename(url).replace(/\.[^.]+$/i, "");
+}
+
+function parseTimestampStem(stem) {
+  if (/^\d{13}$/.test(stem)) return Number(stem);
+  return null;
+}
+
+function numberedStemParts(stem) {
+  const match = stem.match(/^(.+)\((\d+)\)$/);
+  if (match) return { base: match[1].toLowerCase(), num: Number(match[2]) };
+  return { base: stem.toLowerCase(), num: 0 };
+}
+
+function sortGroupImages(images) {
+  return [...images].sort((a, b) => {
+    const sa = imageStem(a);
+    const sb = imageStem(b);
+    const ta = parseTimestampStem(sa);
+    const tb = parseTimestampStem(sb);
+    if (ta != null && tb != null) return ta - tb;
+    const na = numberedStemParts(sa);
+    const nb = numberedStemParts(sb);
+    if (na.base === nb.base) return na.num - nb.num;
+    return sa.localeCompare(sb, "pt-BR", { sensitivity: "base" });
+  });
+}
+
+function groupImagesByShirt(images) {
+  if (!images?.length) return [];
+
+  const groups = [];
+
+  for (const src of images) {
+    const stem = imageStem(src);
+    const ts = parseTimestampStem(stem);
+
+    if (ts != null) {
+      const last = groups[groups.length - 1];
+      if (last?.kind === "timestamp" && ts - last.lastTs <= TIMESTAMP_GROUP_GAP_MS) {
+        last.images.push(src);
+        last.lastTs = ts;
+      } else {
+        groups.push({ kind: "timestamp", lastTs: ts, images: [src] });
+      }
+      continue;
+    }
+
+    const { base } = numberedStemParts(stem);
+    const existing = groups.find((g) => g.kind === "numbered" && g.base === base);
+    if (existing) {
+      existing.images.push(src);
+    } else {
+      groups.push({ kind: "numbered", base, images: [src] });
+    }
+  }
+
+  return groups.map((g) => {
+    const sorted = sortGroupImages(g.images);
+    return { cover: sorted[0], images: sorted };
+  });
+}
+
+function resolveImageGroups(images, manifestGroups) {
+  if (manifestGroups?.length) {
+    return manifestGroups.map((group) => {
+      const urls = assetUrls(group);
+      return { cover: urls[0], images: urls };
+    });
+  }
+  return groupImagesByShirt(images);
+}
+
+function getCategoryImageGroups(imageManifest, folder) {
+  return imageManifest?.groups?.categories?.[folder] || null;
+}
+
+function getTeamImageGroups(team, imageManifest) {
+  if (!team || !imageManifest?.groups) return null;
+  if (team.flat) return imageManifest.groups.flatTeams?.[team.id] || null;
+  return imageManifest.groups.teams?.[team.leaguePath]?.[team.teamPath || team.id] || null;
+}
+
+function globalImageIndex(groups, groupIndex, localIndex = 0) {
+  let idx = 0;
+  for (let g = 0; g < groupIndex; g++) idx += groups[g].images.length;
+  return idx + localIndex;
+}
+
+function buildStaticCatalogLeagues() {
+  return LEAGUES.map((lg) => ({
+    ...lg,
+    teams: (TEAMS[lg.id] || []).map((t) => ({
+      ...t,
+      flat: false,
+      leaguePath: lg.id,
+      teamPath: t.id,
+      photoCount: 0,
+    })),
+  })).filter((lg) => lg.teams.length > 0);
+}
+
+function mergeGallerySources(serverManifest, publishedGallery, localDraft) {
+  let merged = mergeGalleryIntoManifest(serverManifest, publishedGallery);
+  if (localDraft) merged = mergeGalleryIntoManifest(merged, localDraft);
+  return merged;
 }
 
 async function fetchStoreCatalog() {
-  const [manifestRes, catalogRes] = await Promise.all([
+  const [manifestRes, catalogRes, publishedGallery] = await Promise.all([
     fetch("/catalog/image-manifest.json"),
     fetch("/catalog/teams-catalog.json"),
+    fetchPublishedGallery(),
   ]);
   if (!manifestRes.ok || !catalogRes.ok) {
     throw new Error("Não foi possível carregar o catálogo de fotos.");
   }
-  const imageManifest = await manifestRes.json();
+  const serverManifest = await manifestRes.json();
   const teamsCatalog = await catalogRes.json();
-  return { imageManifest, catalogLeagues: teamsCatalog.leagues || [] };
+  const localDraft = loadLocalGalleryDraft();
+  const imageManifest = mergeGallerySources(serverManifest, publishedGallery, localDraft);
+  const catalogLeagues =
+    teamsCatalog.leagues?.length > 0 ? teamsCatalog.leagues : buildStaticCatalogLeagues();
+  return { imageManifest, catalogLeagues, galleryDraft: localDraft || publishedGallery };
 }
 
 /* ───────── TEAMS DATA (legado — admin / produtos) ───────── */
@@ -293,15 +434,15 @@ function openWhatsAppInquiry(ctx) {
 }
 
 function canShowAdmin() {
-  if (import.meta.env.DEV) return true;
-  return new URLSearchParams(window.location.search).get("admin") === "1";
+  return true;
 }
 
 /* Catálogo dinâmico — carregado de /catalog/*.json em runtime */
 function getTeamImages(team, imageManifest) {
   if (!team || !imageManifest) return [];
-  if (team.flat) return assetUrls(imageManifest.flatTeams?.[team.id]);
-  return assetUrls(imageManifest.teams?.[team.leaguePath]?.[team.teamPath || team.id]);
+  const galleryImages = imageManifest._galleryImages;
+  if (team.flat) return assetUrls(imageManifest.flatTeams?.[team.id], galleryImages);
+  return assetUrls(imageManifest.teams?.[team.leaguePath]?.[team.teamPath || team.id], galleryImages);
 }
 
 function findCatalogTeam(teamId, catalogLeagues) {
@@ -344,7 +485,7 @@ function ContactBanner({ GOLD, compact = false, centered = true }) {
       )}
       {compact && (
         <p style={{ color: "#aaa", fontSize: 12, marginBottom: 10, lineHeight: 1.5 }}>
-          Clique para ampliar · Fale com o vendedor no WhatsApp
+          Clique na foto para ampliar e ver outros modelos · WhatsApp abaixo
         </p>
       )}
       <div style={{ display: "flex", gap: 10, justifyContent: centered ? "center" : "flex-start", flexWrap: "wrap", marginBottom: compact ? 0 : 10 }}>
@@ -468,7 +609,7 @@ function ImageLightbox({ images, index, onClose, onChange, GOLD, inquiryContext 
 
         {images.length > 1 && (
           <div style={{ color: "#aaa", fontSize: 14, fontWeight: 700, letterSpacing: 1 }}>
-            {index + 1} / {images.length}
+            Foto {index + 1} de {images.length}
           </div>
         )}
       </div>
@@ -476,8 +617,9 @@ function ImageLightbox({ images, index, onClose, onChange, GOLD, inquiryContext 
   );
 }
 
-function PhotoGallery({ images, label, GOLD, inquiryContext }) {
-  const [lightboxIndex, setLightboxIndex] = useState(null);
+function PhotoGallery({ images, manifestGroups, label, GOLD, inquiryContext }) {
+  const groups = useMemo(() => resolveImageGroups(images, manifestGroups), [images, manifestGroups]);
+  const [lightbox, setLightbox] = useState(null);
 
   if (!images?.length) return null;
   return (
@@ -488,32 +630,29 @@ function PhotoGallery({ images, label, GOLD, inquiryContext }) {
         </h2>
       )}
       <div className="photo-grid">
-        {images.map((src, i) => (
+        {groups.map((group, groupIndex) => (
           <div
-            key={src}
+            key={group.cover}
             style={{background:"#161616",borderRadius:14,overflow:"hidden",border:`1px solid ${GOLD}22`,display:"block",width:"100%",textAlign:"left"}}
           >
             <div style={{aspectRatio:"1",overflow:"hidden",position:"relative"}}>
               <button
                 type="button"
-                onClick={() => openWhatsAppInquiry({ ...inquiryContext, imageIndex: i })}
+                onClick={() => setLightbox({ images: group.images, index: 0, groupIndex })}
                 style={{width:"100%",height:"100%",padding:0,border:"none",cursor:"pointer",display:"block",background:"none"}}
-                aria-label="Comprar via WhatsApp"
+                aria-label={group.images.length > 1 ? "Ampliar e ver outros modelos" : "Ampliar foto"}
               >
-                <img src={src} alt={`${label || inquiryContext?.name || "Foto"} ${i + 1}`} style={{width:"100%",height:"100%",objectFit:"cover",display:"block",pointerEvents:"none"}} loading="lazy"/>
+                <img src={group.cover} alt={`${label || inquiryContext?.name || "Foto"} ${groupIndex + 1}`} style={{width:"100%",height:"100%",objectFit:"cover",display:"block",pointerEvents:"none"}} loading="lazy"/>
               </button>
-              <button
-                type="button"
-                title="Ampliar foto"
-                onClick={(e) => { e.stopPropagation(); setLightboxIndex(i); }}
-                style={{position:"absolute",top:8,right:8,background:"#000c",border:`1px solid ${GOLD}66`,color:GOLD,borderRadius:8,padding:"6px 10px",fontSize:11,fontWeight:700,cursor:"pointer"}}
-              >
-                🔍 Ampliar
-              </button>
+              {group.images.length > 1 && (
+                <div style={{position:"absolute",bottom:8,right:8,background:"#000c",border:`1px solid ${GOLD}66`,color:GOLD,borderRadius:8,padding:"5px 10px",fontSize:11,fontWeight:700,pointerEvents:"none"}}>
+                  +{group.images.length - 1} foto{group.images.length - 1 !== 1 ? "s" : ""}
+                </div>
+              )}
             </div>
             <button
               type="button"
-              onClick={() => openWhatsAppInquiry({ ...inquiryContext, imageIndex: i })}
+              onClick={() => openWhatsAppInquiry({ ...inquiryContext, imageIndex: globalImageIndex(groups, groupIndex) })}
               style={{width:"100%",padding:"10px 12px",border:"none",borderTop:`1px solid ${GOLD}22`,background:"#1a1a1a",cursor:"pointer",textAlign:"left"}}
             >
               <p style={{fontSize:11,color:GOLD,fontWeight:700,marginBottom:4}}>💬 QUERO COMPRAR</p>
@@ -523,12 +662,12 @@ function PhotoGallery({ images, label, GOLD, inquiryContext }) {
         ))}
       </div>
 
-      {lightboxIndex !== null && (
+      {lightbox && (
         <ImageLightbox
-          images={images}
-          index={lightboxIndex}
-          onClose={() => setLightboxIndex(null)}
-          onChange={setLightboxIndex}
+          images={lightbox.images}
+          index={lightbox.index}
+          onClose={() => setLightbox(null)}
+          onChange={(index) => setLightbox((prev) => prev ? { ...prev, index } : prev)}
           GOLD={GOLD}
           inquiryContext={inquiryContext}
         />
@@ -566,6 +705,9 @@ function TeamCircle({ team, size=72, selected=false }) {
 export default function App() {
   const [products, setProducts]       = useState([]);
   const [imageManifest, setImageManifest] = useState(null);
+  const [serverManifest, setServerManifest] = useState(null);
+  const [publishedGallery, setPublishedGallery] = useState(() => emptyGalleryStore());
+  const [galleryStore, setGalleryStore] = useState(() => emptyGalleryStore());
   const [catalogLeagues, setCatalogLeagues] = useState([]);
   const [view, setView]               = useState("store");
   const [activeLeague, setActiveLeague] = useState("br");
@@ -663,6 +805,13 @@ export default function App() {
           fetchStoreCatalog(),
           window.storage.get(STORAGE_KEY).catch(() => null),
         ]);
+        const manifestRes = await fetch("/catalog/image-manifest.json");
+        const server = manifestRes.ok ? await manifestRes.json() : { categories: {}, teams: {}, flatTeams: {}, groups: { categories: {}, teams: {}, flatTeams: {} } };
+        const published = await fetchPublishedGallery();
+        const localDraft = loadLocalGalleryDraft();
+        setServerManifest(server);
+        setPublishedGallery(published);
+        setGalleryStore(localDraft || published);
         setImageManifest(catalog.imageManifest);
         setCatalogLeagues(catalog.catalogLeagues);
         setActiveLeague(catalog.catalogLeagues[0]?.id || "br");
@@ -677,6 +826,11 @@ export default function App() {
 
   const save = async p => { setProducts(p); try { await window.storage.set(STORAGE_KEY, JSON.stringify(p)); } catch {} };
   const toast$ = (msg,err) => { setToast({msg,err}); setTimeout(()=>setToast(null),3000); };
+  const refreshGalleryManifest = (nextStore) => {
+    const normalized = saveLocalGalleryDraft(nextStore);
+    setGalleryStore(normalized);
+    if (serverManifest) setImageManifest(mergeGallerySources(serverManifest, publishedGallery, normalized));
+  };
   const cartCount = cart.reduce((s,i)=>s+i.qty,0);
   const cartTotal = cart.reduce((s,i)=>s+i.price*i.qty,0);
 
@@ -776,7 +930,8 @@ export default function App() {
       {view==="store"&&selectedCategory&&(
         <CategoryGalleryView
           category={selectedCategory}
-          images={assetUrls(imageManifest.categories?.[selectedCategory.folder])}
+          images={assetUrls(imageManifest.categories?.[selectedCategory.folder], imageManifest._galleryImages)}
+          manifestGroups={getCategoryImageGroups(imageManifest, selectedCategory.folder)}
           products={products}
           onBack={()=>setSelectedCategory(null)}
           onSelectProduct={p=>{setSelectedProduct(p);setView("product");}}
@@ -873,6 +1028,7 @@ export default function App() {
         <TeamProductsView
           team={selectedTeam}
           images={getTeamImages(selectedTeam, imageManifest)}
+          manifestGroups={getTeamImageGroups(selectedTeam, imageManifest)}
           products={products}
           onBack={()=>setSelectedTeam(null)}
           onSelectProduct={p=>{setSelectedProduct(p);setView("product");}}
@@ -900,6 +1056,27 @@ export default function App() {
         <AdminPanel FF={FF} GOLD={GOLD} products={products} adminView={adminView} setAdminView={setAdminView}
           editingProduct={editingProduct} setEditingProduct={setEditingProduct}
           catalogLeagues={catalogLeagues}
+          galleryStore={galleryStore}
+          onGalleryChange={refreshGalleryManifest}
+          onPublishGallery={()=>{
+            downloadGalleryStore(galleryStore);
+            toast$("Arquivo gallery-store.json baixado. Coloque em public/catalog/ e faça deploy.");
+          }}
+          onImportGallery={async (file)=>{
+            try {
+              const imported = await importGalleryStoreFromFile(file);
+              refreshGalleryManifest(imported);
+              toast$("Catálogo de fotos importado! ✅");
+            } catch {
+              toast$("Arquivo inválido ❌", true);
+            }
+          }}
+          onClearGalleryDraft={()=>{
+            clearLocalGalleryDraft();
+            setGalleryStore(publishedGallery);
+            if (serverManifest) setImageManifest(mergeGallerySources(serverManifest, publishedGallery, null));
+            toast$("Rascunho local de fotos removido.");
+          }}
           onSave={p=>{
             if(p.id&&products.find(x=>x.id===p.id)){save(products.map(x=>x.id===p.id?p:x));toast$("Atualizado! ✅");}
             else{save([...products,{...p,id:Date.now().toString()}]);toast$("Produto adicionado! ✅");}
@@ -958,9 +1135,10 @@ export default function App() {
 }
 
 /* ═══ CATEGORY GALLERY ═══ */
-function CategoryGalleryView({ category, images, products, onBack, onSelectProduct, GOLD, FF, catalogLeagues = [] }) {
+function CategoryGalleryView({ category, images, manifestGroups, products, onBack, onSelectProduct, GOLD, FF, catalogLeagues = [] }) {
   const categoryProducts = products.filter(p => p.category === category.productCategory);
   const hasImages = images.length > 0;
+  const shirtCount = useMemo(() => resolveImageGroups(images, manifestGroups).length, [images, manifestGroups]);
 
   return (
     <div className="page-section" style={{animation:"fadeUp .3s ease"}}>
@@ -971,13 +1149,13 @@ function CategoryGalleryView({ category, images, products, onBack, onSelectProdu
         <div>
           <p style={{fontSize:12,letterSpacing:3,color:GOLD,fontWeight:700,marginBottom:4}}>COLEÇÃO</p>
           <h1 style={{fontFamily:FF,fontSize:44,letterSpacing:3,lineHeight:1}}>{category.label.toUpperCase()}</h1>
-          {hasImages && <p style={{color:"#666",fontSize:14,marginTop:6}}>{images.length} foto{images.length!==1?"s":""}</p>}
+          {hasImages && <p style={{color:"#666",fontSize:14,marginTop:6}}>{shirtCount} camisa{shirtCount!==1?"s":""}</p>}
         </div>
       </div>
 
       {hasImages ? (
         <>
-          <PhotoGallery images={images} GOLD={GOLD} inquiryContext={{ section: "Categoria", name: category.label }}/>
+          <PhotoGallery images={images} manifestGroups={manifestGroups} GOLD={GOLD} inquiryContext={{ section: "Categoria", name: category.label }}/>
           <div style={{marginTop:24}}>
             <ContactBanner GOLD={GOLD} compact={false} centered />
           </div>
@@ -1011,9 +1189,10 @@ function CategoryGalleryView({ category, images, products, onBack, onSelectProdu
 }
 
 /* ═══ TEAM PRODUCTS VIEW ═══ */
-function TeamProductsView({ team, images, products, onBack, onSelectProduct, GOLD, FF, catalogLeagues = [] }) {
+function TeamProductsView({ team, images, manifestGroups, products, onBack, onSelectProduct, GOLD, FF, catalogLeagues = [] }) {
   const teamProducts = products.filter(p=>p.teamId===team.id);
   const hasImages = images.length > 0;
+  const shirtCount = useMemo(() => resolveImageGroups(images, manifestGroups).length, [images, manifestGroups]);
 
   return (
     <div className="page-section" style={{animation:"fadeUp .3s ease"}}>
@@ -1024,7 +1203,7 @@ function TeamProductsView({ team, images, products, onBack, onSelectProduct, GOL
           <p style={{fontSize:12,letterSpacing:3,color:GOLD,fontWeight:700,marginBottom:4}}>COLEÇÃO OFICIAL</p>
           <h1 style={{fontFamily:FF,fontSize:"clamp(28px,6vw,44px)",letterSpacing:3,lineHeight:1}}>{team.name.toUpperCase()}</h1>
           <p style={{color:"#666",fontSize:14,marginTop:6}}>
-            {hasImages && `${images.length} foto${images.length!==1?"s":""}`}
+            {hasImages && `${shirtCount} camisa${shirtCount!==1?"s":""}`}
             {hasImages && teamProducts.length > 0 && " · "}
             {teamProducts.length > 0 && `${teamProducts.length} produto${teamProducts.length!==1?"s":""}`}
             {!hasImages && teamProducts.length === 0 && "Sem fotos nem produtos ainda"}
@@ -1034,7 +1213,7 @@ function TeamProductsView({ team, images, products, onBack, onSelectProduct, GOL
 
       {hasImages && (
         <>
-          <PhotoGallery images={images} label="FOTOS" GOLD={GOLD} inquiryContext={{ section: "Time", name: team.name }}/>
+          <PhotoGallery images={images} manifestGroups={manifestGroups} label="FOTOS" GOLD={GOLD} inquiryContext={{ section: "Time", name: team.name }}/>
           <div style={{marginBottom:32}}>
             <ContactBanner GOLD={GOLD} compact={false} centered />
           </div>
@@ -1077,24 +1256,14 @@ function ProductCard({ product, onClick, GOLD, FF, catalogLeagues = [] }) {
       onMouseLeave={e=>{e.currentTarget.style.transform="translateY(0)";e.currentTarget.style.borderColor="#222";}}>
       <div style={{height:210,position:"relative",background:"#1a1a1a",display:"flex",alignItems:"center",justifyContent:"center",overflow:"hidden"}}>
         {product.image
-          ?<>
-            <button
+          ?<button
               type="button"
-              onClick={(e)=>{e.stopPropagation();openWhatsAppInquiry({ ...inquiryContext, imageIndex: 0 });}}
+              onClick={(e)=>{e.stopPropagation();setLightboxOpen(true);}}
               style={{width:"100%",height:"100%",padding:0,border:"none",cursor:"pointer",display:"block",background:"none"}}
-              aria-label="Comprar via WhatsApp"
+              aria-label="Ampliar foto"
             >
               <img src={assetUrl(product.image)} alt={product.name} style={{width:"100%",height:"100%",objectFit:"cover",pointerEvents:"none"}}/>
             </button>
-            <button
-              type="button"
-              title="Ampliar foto"
-              onClick={(e)=>{e.stopPropagation();setLightboxOpen(true);}}
-              style={{position:"absolute",top:8,right:8,background:"#000c",border:`1px solid ${GOLD}66`,color:GOLD,borderRadius:8,padding:"6px 10px",fontSize:11,fontWeight:700,cursor:"pointer"}}
-            >
-              🔍
-            </button>
-          </>
           :<div style={{display:"flex",flexDirection:"column",alignItems:"center",gap:10}}>
             <TeamCircle team={teamObj} size={90} selected/>
             <span style={{color:"#444",fontSize:12,fontWeight:700,letterSpacing:2}}>{product.category?.toUpperCase()}</span>
@@ -1140,24 +1309,14 @@ function ProductDetail({ product, onBack, onAdd, GOLD, FF, catalogLeagues = [] }
       <div className="product-detail-grid">
         <div style={{position:"relative",background:"#161616",borderRadius:18,aspectRatio:"1",border:`1px solid ${GOLD}33`,overflow:"hidden"}}>
           {product.image
-            ?<>
-              <button
+            ?<button
                 type="button"
-                onClick={()=>openWhatsAppInquiry({ ...inquiryContext, imageIndex: 0 })}
+                onClick={()=>setLightboxOpen(true)}
                 style={{width:"100%",height:"100%",padding:0,border:"none",cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",background:"none"}}
-                aria-label="Comprar via WhatsApp"
+                aria-label="Ampliar foto"
               >
                 <img src={assetUrl(product.image)} alt={product.name} style={{width:"100%",height:"100%",objectFit:"cover",pointerEvents:"none"}}/>
               </button>
-              <button
-                type="button"
-                title="Ampliar foto"
-                onClick={()=>setLightboxOpen(true)}
-                style={{position:"absolute",top:12,right:12,background:"#000c",border:`1px solid ${GOLD}66`,color:GOLD,borderRadius:8,padding:"6px 10px",fontSize:11,fontWeight:700,cursor:"pointer"}}
-              >
-                🔍 Ampliar
-              </button>
-            </>
             :<div style={{width:"100%",height:"100%",display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",gap:16}}>
               <TeamCircle team={teamObj} size={160} selected/>
               <span style={{color:"#555",fontSize:14,fontWeight:700,letterSpacing:2}}>{product.category?.toUpperCase()}</span>
@@ -1220,7 +1379,7 @@ function AdminLogin({ onLogin, onBack, FF, GOLD }) {
         <div style={{textAlign:"center",marginBottom:32}}>
           <div style={{width:70,height:70,borderRadius:"50%",background:"#1a1a1a",border:`2px solid ${GOLD}`,display:"flex",alignItems:"center",justifyContent:"center",fontSize:32,margin:"0 auto 16px"}}>🔐</div>
           <h2 style={{fontFamily:FF,fontSize:34,color:GOLD,letterSpacing:3,marginBottom:8}}>ÁREA ADMIN</h2>
-          <p style={{color:"#555",fontSize:13}}>Senha padrão: <span style={{color:GOLD,fontWeight:700}}>admin123</span></p>
+          <p style={{color:"#555",fontSize:13}}>Acesso restrito ao dono da loja</p>
         </div>
         <label style={{fontSize:11,color:"#666",letterSpacing:2,display:"block",marginBottom:8}}>SENHA</label>
         <input className="inp" type="password" placeholder="Digite a senha..." value={pwd} onChange={e=>setPwd(e.target.value)} onKeyDown={e=>e.key==="Enter"&&onLogin(pwd)} style={{marginBottom:20}}/>
@@ -1232,7 +1391,148 @@ function AdminLogin({ onLogin, onBack, FF, GOLD }) {
 }
 
 /* ═══ ADMIN PANEL ═══ */
-function AdminPanel({ FF, GOLD, products, adminView, setAdminView, editingProduct, setEditingProduct, onSave, onDelete, onLogout, catalogLeagues = [] }) {
+function AdminGalleryPanel({ FF, GOLD, galleryStore, catalogLeagues, onGalleryChange, onPublishGallery, onImportGallery, onClearGalleryDraft, onToast }) {
+  const [targetType, setTargetType] = useState("team");
+  const [leagueId, setLeagueId] = useState(catalogLeagues[0]?.id || "br");
+  const [teamId, setTeamId] = useState(catalogLeagues[0]?.teams[0]?.id || "");
+  const [categoryFolder, setCategoryFolder] = useState(CATEGORY_GALLERIES[0]?.folder || "kit-treino");
+  const [uploading, setUploading] = useState(false);
+  const fileRef = useRef();
+
+  const league = catalogLeagues.find((lg) => lg.id === leagueId);
+  const team = league?.teams.find((t) => t.id === teamId);
+
+  const target = useMemo(() => {
+    if (targetType === "category") {
+      return { bucket: "category", categoryFolder };
+    }
+    if (team?.flat) {
+      return { bucket: "flatTeam", teamId: team.id };
+    }
+    return {
+      bucket: "team",
+      league: team?.leaguePath || leagueId,
+      teamId: team?.teamPath || team?.id || teamId,
+    };
+  }, [targetType, categoryFolder, team, leagueId, teamId]);
+
+  const groups = useMemo(() => {
+    if (target.bucket === "category") return galleryStore.groups.categories[categoryFolder] || [];
+    if (target.bucket === "flatTeam") return galleryStore.groups.flatTeams[teamId] || [];
+    return galleryStore.groups.teams[target.league]?.[target.teamId] || [];
+  }, [galleryStore, target, categoryFolder, teamId]);
+
+  const handleFiles = async (fileList) => {
+    const files = [...fileList];
+    if (!files.length) return;
+    setUploading(true);
+    try {
+      const compressed = [];
+      for (const file of files) {
+        const dataUrl = await compressImageFile(file);
+        compressed.push({ dataUrl });
+      }
+      onGalleryChange(addImagesToGallery(galleryStore, target, compressed));
+      onToast(`${files.length} foto(s) adicionada(s) como novo modelo ✅`);
+    } catch {
+      onToast("Erro ao processar imagem ❌", true);
+    } finally {
+      setUploading(false);
+      if (fileRef.current) fileRef.current.value = "";
+    }
+  };
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
+      <div style={{ background: "#1a1a1a", borderRadius: 14, padding: 20, border: `1px solid ${GOLD}33` }}>
+        <p style={{ color: "#aaa", fontSize: 14, lineHeight: 1.6, marginBottom: 16 }}>
+          Adicione fotos por <strong style={{ color: GOLD }}>modelo</strong> (uma camisa). Várias fotos no mesmo envio =
+          mesmo modelo (ângulos diferentes). Depois use <strong style={{ color: GOLD }}>Publicar no site</strong> para
+          todos os visitantes verem as fotos.
+        </p>
+        <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginBottom: 16 }}>
+          <button type="button" className={targetType === "team" ? "btn-g" : "btn-o"} onClick={() => setTargetType("team")}>
+            ⚽ Time
+          </button>
+          <button type="button" className={targetType === "category" ? "btn-g" : "btn-o"} onClick={() => setTargetType("category")}>
+            👕 Categoria
+          </button>
+        </div>
+
+        {targetType === "team" ? (
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+            <div>
+              <label style={{ fontSize: 11, color: "#666", letterSpacing: 2, display: "block", marginBottom: 6 }}>LIGA</label>
+              <select className="inp" value={leagueId} onChange={(e) => { setLeagueId(e.target.value); const lg = catalogLeagues.find((l) => l.id === e.target.value); setTeamId(lg?.teams[0]?.id || ""); }}>
+                {catalogLeagues.map((lg) => (
+                  <option key={lg.id} value={lg.id}>{lg.icon} {lg.label}</option>
+                ))}
+              </select>
+            </div>
+            <div>
+              <label style={{ fontSize: 11, color: "#666", letterSpacing: 2, display: "block", marginBottom: 6 }}>TIME</label>
+              <select className="inp" value={teamId} onChange={(e) => setTeamId(e.target.value)}>
+                {(league?.teams || []).map((t) => (
+                  <option key={t.id} value={t.id}>{t.name}</option>
+                ))}
+              </select>
+            </div>
+          </div>
+        ) : (
+          <div>
+            <label style={{ fontSize: 11, color: "#666", letterSpacing: 2, display: "block", marginBottom: 6 }}>CATEGORIA</label>
+            <select className="inp" value={categoryFolder} onChange={(e) => setCategoryFolder(e.target.value)}>
+              {CATEGORY_GALLERIES.map((c) => (
+                <option key={c.id} value={c.folder}>{c.label}</option>
+              ))}
+            </select>
+          </div>
+        )}
+
+        <input ref={fileRef} type="file" accept="image/*" multiple style={{ display: "none" }} onChange={(e) => handleFiles(e.target.files)} />
+        <button type="button" className="btn-g" style={{ width: "100%", marginTop: 16, padding: 14 }} disabled={uploading} onClick={() => fileRef.current?.click()}>
+          {uploading ? "Processando..." : "📷 Adicionar modelo (selecionar fotos)"}
+        </button>
+      </div>
+
+      <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+        <button type="button" className="btn-g" onClick={onPublishGallery}>🌐 Publicar no site (baixar JSON)</button>
+        <button type="button" className="btn-o" onClick={() => document.getElementById("gallery-import")?.click()}>📥 Importar JSON</button>
+        <input id="gallery-import" type="file" accept="application/json,.json" style={{ display: "none" }} onChange={(e) => { const f = e.target.files?.[0]; if (f) onImportGallery(f); e.target.value = ""; }} />
+        <button type="button" className="btn-d" onClick={onClearGalleryDraft}>Limpar rascunho local</button>
+      </div>
+
+      <div>
+        <h3 style={{ fontFamily: FF, fontSize: 24, color: GOLD, letterSpacing: 2, marginBottom: 14 }}>
+          Modelos nesta pasta ({groups.length})
+        </h3>
+        {groups.length === 0 ? (
+          <p style={{ color: "#666", fontSize: 14 }}>Nenhuma foto aqui ainda. Use o botão acima para adicionar.</p>
+        ) : (
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(140px, 1fr))", gap: 12 }}>
+            {groups.map((group, gi) => (
+              <div key={gi} style={{ background: "#161616", borderRadius: 12, overflow: "hidden", border: `1px solid ${GOLD}22` }}>
+                <div style={{ aspectRatio: "1", background: "#222" }}>
+                  {group[0] && galleryStore.images[group[0]] && (
+                    <img src={galleryStore.images[group[0]]} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+                  )}
+                </div>
+                <div style={{ padding: "8px 10px", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                  <span style={{ fontSize: 11, color: "#888" }}>{group.length} foto{group.length !== 1 ? "s" : ""}</span>
+                  <button type="button" className="btn-d" style={{ padding: "4px 10px", fontSize: 11 }} onClick={() => onGalleryChange(removeGalleryGroup(galleryStore, target, gi))}>
+                    🗑️
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function AdminPanel({ FF, GOLD, products, adminView, setAdminView, editingProduct, setEditingProduct, onSave, onDelete, onLogout, catalogLeagues = [], galleryStore, onGalleryChange, onPublishGallery, onImportGallery, onClearGalleryDraft }) {
   const avgPrice = products.length?products.reduce((s,p)=>s+p.price,0)/products.length:0;
   const uniqTeams = [...new Set(products.map(p=>p.teamId))].length;
   const stats = [
@@ -1246,7 +1546,7 @@ function AdminPanel({ FF, GOLD, products, adminView, setAdminView, editingProduc
       <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:28,flexWrap:"wrap",gap:12}}>
         <div>
           <h1 style={{fontFamily:FF,fontSize:40,color:GOLD,letterSpacing:3}}>⚙ PAINEL ADMIN</h1>
-          <p style={{color:"#555",fontSize:14,marginTop:4}}>Gerencie produtos de todos os times</p>
+          <p style={{color:"#555",fontSize:14,marginTop:4}}>Gerencie fotos e produtos da loja</p>
         </div>
         <button className="btn-d" onClick={onLogout}>Sair</button>
       </div>
@@ -1259,10 +1559,25 @@ function AdminPanel({ FF, GOLD, products, adminView, setAdminView, editingProduc
           </div>
         ))}
       </div>
-      <div style={{display:"flex",gap:10,marginBottom:24}}>
+      <div style={{display:"flex",gap:10,marginBottom:24,flexWrap:"wrap"}}>
         <button className={adminView==="list"?"btn-g":"btn-o"} style={{padding:"10px 22px"}} onClick={()=>{setAdminView("list");setEditingProduct(null);}}>📋 Produtos</button>
-        <button className={adminView==="add"?"btn-g":"btn-o"} style={{padding:"10px 22px"}} onClick={()=>{setAdminView("add");setEditingProduct(null);}}>+ Adicionar</button>
+        <button className={adminView==="photos"?"btn-g":"btn-o"} style={{padding:"10px 22px"}} onClick={()=>{setAdminView("photos");setEditingProduct(null);}}>📷 Fotos</button>
+        <button className={adminView==="add"?"btn-g":"btn-o"} style={{padding:"10px 22px"}} onClick={()=>{setAdminView("add");setEditingProduct(null);}}>+ Produto</button>
       </div>
+
+      {adminView==="photos"&&(
+        <AdminGalleryPanel
+          FF={FF}
+          GOLD={GOLD}
+          galleryStore={galleryStore}
+          catalogLeagues={catalogLeagues}
+          onGalleryChange={onGalleryChange}
+          onPublishGallery={onPublishGallery}
+          onImportGallery={onImportGallery}
+          onClearGalleryDraft={onClearGalleryDraft}
+          onToast={toast$}
+        />
+      )}
 
       {adminView==="list"&&(
         <div>

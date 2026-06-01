@@ -1,6 +1,7 @@
 import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
+import { buildAllImageGroups } from "./image-groups.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const publicDir = path.join(root, "public");
@@ -22,12 +23,13 @@ function listImages(dir, urlPrefix) {
     });
 }
 
-export function generateImageManifest() {
+export async function generateImageManifest() {
   const manifest = {
     generatedAt: new Date().toISOString(),
     categories: {},
     teams: {},
     flatTeams: {},
+    groups: { categories: {}, teams: {}, flatTeams: {} },
   };
 
   const categoriesDir = path.join(publicDir, "categories");
@@ -68,10 +70,11 @@ export function generateImageManifest() {
     }
   }
 
+  manifest.groups = await buildAllImageGroups(manifest, publicDir);
   return manifest;
 }
 
-export function writeImageManifest(manifest) {
+export async function writeImageManifest(manifest) {
   fs.mkdirSync(path.dirname(outFile), { recursive: true });
   fs.writeFileSync(outFile, JSON.stringify(manifest, null, 2));
   return manifest;
@@ -79,14 +82,21 @@ export function writeImageManifest(manifest) {
 
 const isMain = process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
 if (isMain) {
-  const m = writeImageManifest(generateImageManifest());
+  const m = await writeImageManifest(await generateImageManifest());
   const catCount = Object.values(m.categories).reduce((s, a) => s + a.length, 0);
   const nestedCount = Object.values(m.teams).reduce(
     (s, league) => s + Object.values(league).reduce((t, a) => t + a.length, 0),
     0
   );
   const flatCount = Object.values(m.flatTeams).reduce((s, a) => s + a.length, 0);
+  const groupCount =
+    Object.values(m.groups?.categories || {}).reduce((s, a) => s + a.length, 0) +
+    Object.values(m.groups?.teams || {}).reduce(
+      (s, league) => s + Object.values(league).reduce((t, a) => t + a.length, 0),
+      0
+    ) +
+    Object.values(m.groups?.flatTeams || {}).reduce((s, a) => s + a.length, 0);
   console.log(
-    `Manifest: ${catCount} fotos em categorias, ${nestedCount + flatCount} fotos em times (${Object.keys(m.flatTeams).length} pastas planas) → src/generated/image-manifest.json`
+    `Manifest: ${catCount} fotos em categorias, ${nestedCount + flatCount} fotos em times (${Object.keys(m.flatTeams).length} pastas planas), ${groupCount} modelos → src/generated/image-manifest.json`
   );
 }

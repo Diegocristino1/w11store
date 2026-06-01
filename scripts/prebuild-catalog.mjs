@@ -23,7 +23,7 @@ function hasCommittedCatalog() {
   return fs.existsSync(catalogFile) && fs.existsSync(manifestFile);
 }
 
-const manifest = generateImageManifest();
+const manifest = await generateImageManifest();
 const total = countManifestImages(manifest);
 
 if (total === 0) {
@@ -35,7 +35,7 @@ if (total === 0) {
     "public/ sem fotos no servidor — mantendo src/generated/*.json já commitados."
   );
 } else {
-  writeImageManifest(manifest);
+  await writeImageManifest(manifest);
 
   const catCount = Object.values(manifest.categories).reduce((s, a) => s + a.length, 0);
   const nestedCount = Object.values(manifest.teams).reduce(
@@ -43,8 +43,15 @@ if (total === 0) {
     0
   );
   const flatCount = Object.values(manifest.flatTeams).reduce((s, a) => s + a.length, 0);
+  const groupCount =
+    Object.values(manifest.groups?.categories || {}).reduce((s, a) => s + a.length, 0) +
+    Object.values(manifest.groups?.teams || {}).reduce(
+      (s, league) => s + Object.values(league).reduce((t, a) => t + a.length, 0),
+      0
+    ) +
+    Object.values(manifest.groups?.flatTeams || {}).reduce((s, a) => s + a.length, 0);
   console.log(
-    `Manifest: ${catCount} fotos em categorias, ${nestedCount + flatCount} fotos em times (${Object.keys(manifest.flatTeams).length} pastas planas) → src/generated/image-manifest.json`
+    `Manifest: ${catCount} fotos em categorias, ${nestedCount + flatCount} fotos em times (${Object.keys(manifest.flatTeams).length} pastas planas), ${groupCount} modelos → src/generated/image-manifest.json`
   );
 
   writeTeamsCatalog(manifest);
