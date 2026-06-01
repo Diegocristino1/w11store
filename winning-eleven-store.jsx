@@ -779,7 +779,7 @@ export default function App() {
       }
       @media(max-width:640px){
         .site-header{padding:10px 12px;min-height:auto}
-        .header-admin{display:none!important}
+        .header-admin{padding:6px 10px!important;font-size:11px!important}
         .header-logo-sub{display:none}
         .header-contact a{padding:6px 10px!important;font-size:11px!important}
         .header-actions .btn-o,.header-actions .btn-g{padding:6px 12px!important;font-size:11px!important}
@@ -1489,7 +1489,7 @@ function AdminGalleryPanel({ FF, GOLD, galleryStore, catalogLeagues, onGalleryCh
           </div>
         )}
 
-        <input ref={fileRef} type="file" accept="image/*" multiple style={{ display: "none" }} onChange={(e) => handleFiles(e.target.files)} />
+        <input ref={fileRef} type="file" accept="image/*" multiple style={{ display: "none" }} onChange={(e) => handleFiles(e.target.files)} aria-label="Selecionar fotos da galeria ou câmera" />
         <button type="button" className="btn-g" style={{ width: "100%", marginTop: 16, padding: 14 }} disabled={uploading} onClick={() => fileRef.current?.click()}>
           {uploading ? "Processando..." : "📷 Adicionar modelo (selecionar fotos)"}
         </button>
